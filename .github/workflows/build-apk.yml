@@ -1,17 +1,20 @@
+
 name: Build CoAIde APK
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -19,33 +22,37 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup Java (JDK 17)
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: '21'
 
-      - name: Prepare Web App Directory
+      - name: Install dependencies
+        run: npm install
+
+      - name: Prepare web assets
         run: |
           mkdir -p www
           cp index.html www/index.html
 
-      - name: Initialize Capacitor & Build Android Project
+      - name: Add Android platform and sync
         run: |
-          npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          npx cap init "CoAIde" "com.coaide.app" --web-dir www
-          npx cap add android
+          if [ ! -d android ]; then
+            npx cap add android
+          fi
           npx cap sync android
 
-      - name: Build Debug APK
+      - name: Build debug APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload APK File
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: CoAIde-App-APK
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
