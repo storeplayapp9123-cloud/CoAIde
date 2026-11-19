@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "code.ai.in"
+    namespace = "code.ai.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "code.ai.in"
+        applicationId = "code.ai.app"
         minSdk = 24
         targetSdk = 35
         versionCode = 1
