@@ -1,4 +1,4 @@
-package code.ai.in
+package code.ai.app
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
