@@ -18,7 +18,10 @@ data class ChatMessage(val sender: String, val role: String, val text: String)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val repo = CoAIdeRepository(BuildConfig.GEMINI_API_KEY)
+        val repo = CoAIdeRepository(
+            workerUrl = BuildConfig.WORKER_URL,
+            clientToken = BuildConfig.APP_CLIENT_TOKEN
+        )
 
         setContent {
             MaterialTheme {
