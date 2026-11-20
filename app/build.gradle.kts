@@ -15,8 +15,13 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        val apiKey = project.findProperty("GEMINI_API_KEY") as? String ?: ""
-        buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
+        val defaultClientToken = "coaide_lock_987654"
+        val clientToken = (project.findProperty("APP_CLIENT_TOKEN") as? String)
+            ?.takeIf { it.isNotBlank() }
+            ?: defaultClientToken
+
+        buildConfigField("String", "WORKER_URL", "\"https://coaide-api.storeplayapp9123.workers.dev\"")
+        buildConfigField("String", "APP_CLIENT_TOKEN", "\"$clientToken\"")
     }
 
     buildTypes {
