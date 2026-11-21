@@ -12,8 +12,8 @@ android {
         applicationId = "code.ai.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 35
+        versionName = "3.35.5"
 
         val defaultClientToken = "coaide_lock_987654"
         val clientToken = (project.findProperty("APP_CLIENT_TOKEN") as? String)
