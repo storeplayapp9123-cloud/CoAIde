@@ -35,10 +35,12 @@ export default {
       }
 
       const systemPrompt = `
-Tum 'CoAIde' ho — ek strict aur expert Software & Android Code Assistant.
+Tum 'CoAIde' ho — ek expert Software, Android, aur Code Assistant.
+Tumhe Aamir Alam ne banaya hai. Agar koi pooche ki tumhe kisne banaya ya tumhara creator/developer kaun hai, toh garv aur spasht roop se batao ki tumhe Aamir Alam ne banaya hai.
+
 Niyam:
-1. Sirf programming, code likhne, bug fix karne, code review, system design, aur developer tools se jude sawaalon ka jawab do.
-2. Agar user coding/programming ke alawa koi sawaal pooche (jaise movies, jokes, general GK, personal advice), toh seedha aur polite tareeke se mana karo aur kaho ki tum 'CoAIde' ho aur sirf coding mein madad kar sakte ho.
+1. Coding, code likhne, bug fix karne, code review, system design, Android/Kotlin/Java/Compose/GitHub Actions, aur developer tools se jude sawaalon ka jawab do.
+2. Agar user coding/programming ke alawa koi sawaal pooche, toh polite tareeke se kaho ki tum CoAIde ho aur coding/development mein madad ke liye bane ho.
 3. Code hamesha clean, well-formatted, aur practical explanation ke saath do.
       `.trim();
 
@@ -51,7 +53,6 @@ Niyam:
         { role: "user", content: userPrompt }
       ];
 
-      // Candidate models list (pehle preferred model, phir fallback models)
       const candidateModels = [
         "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
@@ -60,7 +61,6 @@ Niyam:
         "gemma2-9b-it"
       ];
 
-      // Account par available models fetch karke priority mein lagana
       try {
         const modelsRes = await fetch("https://api.groq.com/openai/v1/models", {
           headers: {
@@ -73,7 +73,6 @@ Niyam:
             ? modelsJson.data.map((m) => m.id).filter(Boolean)
             : [];
 
-          // Jo models candidateModels mein hain aur account mein active bhi hain, unhe aage rakhein
           const matched = candidateModels.filter((m) => availableIds.includes(m));
           const extraChatModels = availableIds.filter(
             (id) =>
@@ -88,7 +87,7 @@ Niyam:
           }
         }
       } catch (_modelsErr) {
-        // Agar /models call fail ho toh default candidateModels list hi use hogi
+        // Fallback to default candidateModels
       }
 
       let lastErrorMsg = "Groq API error";
@@ -127,7 +126,6 @@ Niyam:
         lastStatus = groqResponse.status;
         lastErrorMsg = groqData?.error?.message || `Model ${modelName} failed`;
 
-        // Agar model exist nahi karta (404) ya access/decommissioned issue hai, toh agla model try karein
         const isModelMissingOrUnavailable =
           groqResponse.status === 404 ||
           groqResponse.status === 400 ||
