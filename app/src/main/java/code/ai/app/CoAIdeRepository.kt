@@ -27,13 +27,30 @@ class CoAIdeRepository(
         history: List<Pair<String, String>>,
         userPrompt: String,
         imageBase64: String? = null,
-        imageMime: String = "image/jpeg"
+        imageMime: String = "image/jpeg",
+        attachedFileName: String? = null,
+        attachedFileContent: String? = null
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             if (clientToken.isBlank()) {
                 return@withContext Result.failure(
                     Exception("APP_CLIENT_TOKEN missing hai.")
                 )
+            }
+
+            val finalPrompt = if (!attachedFileContent.isNullOrBlank()) {
+                val safeName = attachedFileName ?: "attached_file.txt"
+                val clipped = attachedFileContent.take(12000)
+                buildString {
+                    append(userPrompt)
+                    append("\n\n--- Attached File: ")
+                    append(safeName)
+                    append(" ---\n```\n")
+                    append(clipped)
+                    append("\n```")
+                }
+            } else {
+                userPrompt
             }
 
             val historyArray = JSONArray()
@@ -48,7 +65,7 @@ class CoAIdeRepository(
 
             val payload = JSONObject()
                 .put("history", historyArray)
-                .put("prompt", userPrompt)
+                .put("prompt", finalPrompt)
 
             if (!imageBase64.isNullOrBlank()) {
                 payload.put("imageBase64", imageBase64)
