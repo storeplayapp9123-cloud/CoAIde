@@ -24,7 +24,7 @@ export default {
 
     try {
       const body = await request.json();
-      const history = Array.isArray(body.history) ? body.history : [];
+      const rawHistory = Array.isArray(body.history) ? body.history : [];
       const userPrompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       const imageBase64 = typeof body.imageBase64 === "string" ? body.imageBase64.trim() : "";
       const imageMime = typeof body.imageMime === "string" && body.imageMime.trim()
@@ -48,6 +48,19 @@ Niyam:
 3. Code hamesha clean, well-formatted, aur practical explanation ke saath do.
       `.trim();
 
+      // Token limit (413) se bachne ke liye sirf recent 6 messages rakhein aur purane bade replies trim karein
+      const recentHistory = rawHistory
+        .slice(-6)
+        .map((m) => {
+          const text = String(m.content ?? "");
+          const trimmed = text.length > 1200 ? text.slice(0, 1200) + "\n...[trimmed]" : text;
+          return {
+            role: m.role === "model" ? "assistant" : m.role,
+            content: trimmed
+          };
+        })
+        .filter((m) => m.content.trim().length > 0);
+
       const effectivePrompt = userPrompt || "Is image mein jo code, UI, ya error dikh raha hai uska analysis aur solution batayein.";
 
       const multimodalUserContent = imageBase64
@@ -66,11 +79,6 @@ Niyam:
         ? `${effectivePrompt}\n\n[User ne ek image attach ki thi (${imageMime})]`
         : effectivePrompt;
 
-      const baseHistory = history.map((m) => ({
-        role: m.role === "model" ? "assistant" : m.role,
-        content: String(m.content ?? "")
-      }));
-
       const visionModels = [
         "meta-llama/llama-4-scout-17b-16e-instruct",
         "meta-llama/llama-4-maverick-17b-128e-instruct",
@@ -79,10 +87,11 @@ Niyam:
       ];
 
       const textModels = [
-        "llama-3.3-70b-versatile",
         "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
         "qwen/qwen3-32b",
-        "deepseek-r1-distill-llama-70b",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
         "gemma2-9b-it"
       ];
 
@@ -102,14 +111,23 @@ Niyam:
             ? modelsJson.data.map((m) => m.id).filter(Boolean)
             : [];
 
+          const blockedKeywords = [
+            "whisper",
+            "guard",
+            "tts",
+            "orpheus",
+            "playai",
+            "distil-whisper",
+            "safeguard"
+          ];
+
           const preferred = candidateModels.filter((m) => availableIds.includes(m));
-          const extraModels = availableIds.filter(
-            (id) =>
-              !candidateModels.includes(id) &&
-              !id.toLowerCase().includes("whisper") &&
-              !id.toLowerCase().includes("guard") &&
-              !id.toLowerCase().includes("tts")
-          );
+          const extraModels = availableIds.filter((id) => {
+            const lower = id.toLowerCase();
+            return !candidateModels.includes(id) &&
+              !blockedKeywords.some((kw) => lower.includes(kw));
+          });
+
           const ordered = [...preferred, ...extraModels];
           if (ordered.length > 0) {
             candidateModels = ordered;
@@ -130,7 +148,7 @@ Niyam:
 
         const messages = [
           { role: "system", content: systemPrompt },
-          ...baseHistory,
+          ...recentHistory,
           { role: "user", content: finalUserContent }
         ];
 
@@ -143,7 +161,8 @@ Niyam:
           body: JSON.stringify({
             model: modelName,
             messages,
-            temperature: 0.2
+            temperature: 0.2,
+            max_tokens: 2048
           })
         });
 
@@ -166,12 +185,15 @@ Niyam:
         lastStatus = groqResponse.status;
         lastErrorMsg = groqData?.error?.message || `Model ${modelName} failed`;
 
-        const isModelMissingOrUnavailable =
-          groqResponse.status === 404 ||
+        // 400 (terms/unsupported), 404 (not found), 413 (payload/TPM too large), 429 (rate limit) par agla model try karein
+        const shouldTryNextModel =
           groqResponse.status === 400 ||
-          /model|decommission|not found|access|image_url|vision/i.test(lastErrorMsg);
+          groqResponse.status === 404 ||
+          groqResponse.status === 413 ||
+          groqResponse.status === 429 ||
+          /model|decommission|not found|access|terms|too large|tokens per minute|vision|image_url/i.test(lastErrorMsg);
 
-        if (!isModelMissingOrUnavailable) {
+        if (!shouldTryNextModel) {
           break;
         }
       }
