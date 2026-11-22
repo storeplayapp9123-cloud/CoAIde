@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -439,6 +440,7 @@ private fun MicIcon(tint: Color) {
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val repo = CoAIdeRepository(
             workerUrl = BuildConfig.WORKER_URL,
@@ -868,7 +870,6 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                     .background(palette.bg)
                     .statusBarsPadding()
                     .navigationBarsPadding()
-                    .imePadding()
             ) {
                 Surface(
                     color = palette.surface,
