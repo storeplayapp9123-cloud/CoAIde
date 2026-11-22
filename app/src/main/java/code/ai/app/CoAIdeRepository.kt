@@ -8,18 +8,26 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 class CoAIdeRepository(
     private val workerUrl: String,
     private val clientToken: String
 ) {
 
-    private val client = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun askCoAIde(
         history: List<Pair<String, String>>,
-        userPrompt: String
+        userPrompt: String,
+        imageBase64: String? = null,
+        imageMime: String = "image/jpeg"
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             if (clientToken.isBlank()) {
@@ -41,6 +49,11 @@ class CoAIdeRepository(
             val payload = JSONObject()
                 .put("history", historyArray)
                 .put("prompt", userPrompt)
+
+            if (!imageBase64.isNullOrBlank()) {
+                payload.put("imageBase64", imageBase64)
+                payload.put("imageMime", imageMime)
+            }
 
             val request = Request.Builder()
                 .url(workerUrl)
