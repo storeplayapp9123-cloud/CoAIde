@@ -1,10 +1,17 @@
 package code.ai.app
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -14,11 +21,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -26,9 +37,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 
 private val StudioBg = Color(0xFF0B0F17)
 private val StudioSurface = Color(0xFF131A26)
@@ -45,7 +59,14 @@ data class ChatMessage(
     val sender: String,
     val role: String,
     val text: String,
+    val imageUriString: String? = null,
     val isError: Boolean = false
+)
+
+private data class EncodedImage(
+    val base64: String,
+    val mimeType: String,
+    val previewBitmap: Bitmap?
 )
 
 private sealed interface MessagePart {
@@ -85,10 +106,56 @@ private fun parseMessageParts(rawText: String): List<MessagePart> {
     return parts
 }
 
+private suspend fun encodeUriToBase64(context: Context, uri: Uri): EncodedImage? =
+    withContext(Dispatchers.IO) {
+        try {
+            val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: return@withContext null
+
+            val originalBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                ?: return@withContext null
+
+            val maxDim = 1280
+            val scale = minOf(
+                1f,
+                maxDim.toFloat() / maxOf(originalBitmap.width, originalBitmap.height).toFloat()
+            )
+            val targetW = (originalBitmap.width * scale).toInt().coerceAtLeast(1)
+            val targetH = (originalBitmap.height * scale).toInt().coerceAtLeast(1)
+            val scaledBitmap = Bitmap.createScaledBitmap(originalBitmap, targetW, targetH, true)
+
+            val outStream = ByteArrayOutputStream()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 82, outStream)
+            val compressedBytes = outStream.toByteArray()
+            val encoded = Base64.encodeToString(compressedBytes, Base64.NO_WRAP)
+
+            EncodedImage(
+                base64 = encoded,
+                mimeType = if (mime.startsWith("image/")) mime else "image/jpeg",
+                previewBitmap = scaledBitmap
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+private suspend fun loadBitmapFromUriString(context: Context, uriString: String): Bitmap? =
+    withContext(Dispatchers.IO) {
+        try {
+            val uri = Uri.parse(uriString)
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: return@withContext null
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
 private fun welcomeMessage(): ChatMessage = ChatMessage(
     sender = "CoAIde",
     role = "model",
-    text = "Namaste! Main CoAIde hoon (v3.35.5) — Aamir Alam dwara banaya gaya coding assistant. Code, bugs, ya architecture ke sawaal poochein."
+    text = "Namaste! Main CoAIde hoon (v3.35.5) — Aamir Alam dwara banaya gaya coding assistant. Code, bugs, ya gallery se screenshot/image bhej kar sawaal poochein."
 )
 
 private fun saveChatHistory(context: Context, messages: List<ChatMessage>) {
@@ -100,6 +167,9 @@ private fun saveChatHistory(context: Context, messages: List<ChatMessage>) {
             .put("role", msg.role)
             .put("text", msg.text)
             .put("isError", msg.isError)
+        if (!msg.imageUriString.isNullOrBlank()) {
+            obj.put("imageUriString", msg.imageUriString)
+        }
         arr.put(obj)
     }
     prefs.edit().putString("saved_history_json", arr.toString()).apply()
@@ -115,12 +185,14 @@ private fun loadChatHistory(context: Context): List<ChatMessage> {
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
             val text = obj.optString("text", "")
-            if (text.isNotBlank()) {
+            val imgUri = obj.optString("imageUriString", "").ifBlank { null }
+            if (text.isNotBlank() || imgUri != null) {
                 list.add(
                     ChatMessage(
                         sender = obj.optString("sender", "CoAIde"),
                         role = obj.optString("role", "model"),
                         text = text,
+                        imageUriString = imgUri,
                         isError = obj.optBoolean("isError", false)
                     )
                 )
@@ -174,9 +246,23 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
 
     var inputText by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
+    var encodedImage by remember { mutableStateOf<EncodedImage?>(null) }
+
     val messages = remember {
         mutableStateListOf<ChatMessage>().apply {
             addAll(loadChatHistory(context))
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            selectedUri = uri
+            scope.launch {
+                encodedImage = encodeUriToBase64(context, uri)
+            }
         }
     }
 
@@ -271,10 +357,68 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                         )
                     }
 
+                    val currentPreview = encodedImage?.previewBitmap
+                    if (currentPreview != null || selectedUri != null) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp)
+                                .background(StudioElevated, RoundedCornerShape(12.dp))
+                                .border(1.dp, StudioAccent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (currentPreview != null) {
+                                    Image(
+                                        bitmap = currentPreview.asImageBitmap(),
+                                        contentDescription = "Selected Image",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(54.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Image attached",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = StudioText
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    selectedUri = null
+                                    encodedImage = null
+                                }
+                            ) {
+                                Text("Remove", color = StudioErrorBorder)
+                            }
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.Bottom
                     ) {
+                        OutlinedButton(
+                            enabled = !isLoading,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.height(52.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp),
+                            border = BorderStroke(1.dp, Color(0xFF283548)),
+                            onClick = { galleryLauncher.launch("image/*") }
+                        ) {
+                            Text(
+                                text = "Img",
+                                color = StudioAccent,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
                         OutlinedTextField(
                             value = inputText,
                             onValueChange = { inputText = it },
@@ -297,9 +441,11 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                             ),
                             maxLines = 5
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
                         Button(
-                            enabled = !isLoading && inputText.isNotBlank(),
+                            enabled = !isLoading && (inputText.isNotBlank() || encodedImage != null),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.height(52.dp),
                             colors = ButtonDefaults.buttonColors(
@@ -310,8 +456,27 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                             ),
                             onClick = {
                                 val prompt = inputText.trim()
+                                val imgToSend = encodedImage
+                                val uriStr = selectedUri?.toString()
+
                                 inputText = ""
-                                messages.add(ChatMessage("Aamir", "user", prompt))
+                                selectedUri = null
+                                encodedImage = null
+
+                                val displayText = if (prompt.isNotBlank()) {
+                                    prompt
+                                } else {
+                                    "Is image ko dekhein aur coding/error help dein."
+                                }
+
+                                messages.add(
+                                    ChatMessage(
+                                        sender = "Aamir",
+                                        role = "user",
+                                        text = displayText,
+                                        imageUriString = uriStr
+                                    )
+                                )
                                 isLoading = true
 
                                 val historyPairs = messages
@@ -320,7 +485,12 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                     .map { it.role to it.text }
 
                                 scope.launch {
-                                    val result = repo.askCoAIde(historyPairs, prompt)
+                                    val result = repo.askCoAIde(
+                                        history = historyPairs,
+                                        userPrompt = displayText,
+                                        imageBase64 = imgToSend?.base64,
+                                        imageMime = imgToSend?.mimeType ?: "image/jpeg"
+                                    )
                                     isLoading = false
                                     result.onSuccess { reply ->
                                         messages.add(ChatMessage("CoAIde", "model", reply))
@@ -370,8 +540,16 @@ private fun ChatBubbleCard(
     message: ChatMessage,
     onCopy: (String) -> Unit
 ) {
+    val context = LocalContext.current
     val isUser = message.role == "user"
     var copied by remember(message.text) { mutableStateOf(false) }
+    var loadedBitmap by remember(message.imageUriString) { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(message.imageUriString) {
+        if (!message.imageUriString.isNullOrBlank()) {
+            loadedBitmap = loadBitmapFromUriString(context, message.imageUriString)
+        }
+    }
 
     val containerColor = when {
         message.isError -> StudioErrorBg
@@ -435,68 +613,83 @@ private fun ChatBubbleCard(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(4.dp))
+                if (loadedBitmap != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Image(
+                        bitmap = loadedBitmap!!.asImageBitmap(),
+                        contentDescription = "Sent Image",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                    )
+                }
 
-                val parts = remember(message.text) { parseMessageParts(message.text) }
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    parts.forEach { part ->
-                        when (part) {
-                            is MessagePart.TextPart -> {
-                                Text(
-                                    text = part.content,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (message.isError) Color(0xFFFECACA) else StudioText
-                                )
-                            }
+                Spacer(modifier = Modifier.height(6.dp))
 
-                            is MessagePart.CodePart -> {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(
-                                            color = StudioCodeBg,
-                                            shape = RoundedCornerShape(10.dp)
-                                        )
-                                        .border(
-                                            width = 1.dp,
-                                            color = Color(0xFF1F2A3C),
-                                            shape = RoundedCornerShape(10.dp)
-                                        )
-                                        .padding(10.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = part.language,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = StudioMuted
-                                        )
-                                        TextButton(
-                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                                            modifier = Modifier.height(24.dp),
-                                            onClick = { onCopy(part.code) }
-                                        ) {
-                                            Text(
-                                                text = "Copy Code",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = StudioAccent
-                                            )
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.height(4.dp))
+                SelectionContainer {
+                    val parts = remember(message.text) { parseMessageParts(message.text) }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        parts.forEach { part ->
+                            when (part) {
+                                is MessagePart.TextPart -> {
                                     Text(
-                                        text = part.code,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = StudioText,
+                                        text = part.content,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (message.isError) Color(0xFFFECACA) else StudioText
+                                    )
+                                }
+
+                                is MessagePart.CodePart -> {
+                                    Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .horizontalScroll(rememberScrollState())
-                                    )
+                                            .background(
+                                                color = StudioCodeBg,
+                                                shape = RoundedCornerShape(10.dp)
+                                            )
+                                            .border(
+                                                width = 1.dp,
+                                                color = Color(0xFF1F2A3C),
+                                                shape = RoundedCornerShape(10.dp)
+                                            )
+                                            .padding(10.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = part.language,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = StudioMuted
+                                            )
+                                            TextButton(
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                                modifier = Modifier.height(24.dp),
+                                                onClick = { onCopy(part.code) }
+                                            ) {
+                                                Text(
+                                                    text = "Copy Code",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = StudioAccent
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = part.code,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = StudioText,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .horizontalScroll(rememberScrollState())
+                                        )
+                                    }
                                 }
                             }
                         }
