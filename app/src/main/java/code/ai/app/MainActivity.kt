@@ -1,19 +1,25 @@
 package code.ai.app
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import android.util.Base64
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,12 +28,15 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -35,6 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -43,17 +53,64 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.Locale
 
-private val StudioBg = Color(0xFF0B0F17)
-private val StudioSurface = Color(0xFF131A26)
-private val StudioElevated = Color(0xFF1A2436)
-private val StudioUserBubble = Color(0xFF16324F)
-private val StudioAccent = Color(0xFF38BDF8)
-private val StudioText = Color(0xFFE6EDF3)
-private val StudioMuted = Color(0xFF8B949E)
-private val StudioCodeBg = Color(0xFF070A10)
-private val StudioErrorBg = Color(0xFF3B1219)
-private val StudioErrorBorder = Color(0xFFF87171)
+private data class CoAIdePalette(
+    val isDark: Boolean,
+    val bg: Color,
+    val surface: Color,
+    val elevated: Color,
+    val userBubble: Color,
+    val accent: Color,
+    val onAccent: Color,
+    val text: Color,
+    val muted: Color,
+    val border: Color,
+    val codeBg: Color,
+    val codeBorder: Color,
+    val codeText: Color,
+    val errorBg: Color,
+    val errorBorder: Color,
+    val errorText: Color
+)
+
+private val DarkPalette = CoAIdePalette(
+    isDark = true,
+    bg = Color(0xFF0B0F17),
+    surface = Color(0xFF131A26),
+    elevated = Color(0xFF1A2436),
+    userBubble = Color(0xFF16324F),
+    accent = Color(0xFF38BDF8),
+    onAccent = Color(0xFF04131D),
+    text = Color(0xFFE6EDF3),
+    muted = Color(0xFF8B949E),
+    border = Color(0xFF233044),
+    codeBg = Color(0xFF070A10),
+    codeBorder = Color(0xFF1F2A3C),
+    codeText = Color(0xFFE6EDF3),
+    errorBg = Color(0xFF3B1219),
+    errorBorder = Color(0xFFF87171),
+    errorText = Color(0xFFFECACA)
+)
+
+private val LightPalette = CoAIdePalette(
+    isDark = false,
+    bg = Color(0xFFF4F7FB),
+    surface = Color(0xFFFFFFFF),
+    elevated = Color(0xFFE9EFF6),
+    userBubble = Color(0xFFDCEEFF),
+    accent = Color(0xFF0284C7),
+    onAccent = Color(0xFFFFFFFF),
+    text = Color(0xFF0F172A),
+    muted = Color(0xFF475569),
+    border = Color(0xFFCBD5E1),
+    codeBg = Color(0xFF0F172A),
+    codeBorder = Color(0xFF1E293B),
+    codeText = Color(0xFFF8FAFC),
+    errorBg = Color(0xFFFEE2E2),
+    errorBorder = Color(0xFFDC2626),
+    errorText = Color(0xFF7F1D1D)
+)
 
 data class ChatMessage(
     val sender: String,
@@ -155,7 +212,7 @@ private suspend fun loadBitmapFromUriString(context: Context, uriString: String)
 private fun welcomeMessage(): ChatMessage = ChatMessage(
     sender = "CoAIde",
     role = "model",
-    text = "Namaste! Main CoAIde hoon (v3.35.5) — Aamir Alam dwara banaya gaya coding assistant. Code, bugs, ya gallery se screenshot/image bhej kar sawaal poochein."
+    text = "Namaste! Main CoAIde hoon (v3.35.5) — Aamir Alam dwara banaya gaya coding assistant. Bolkar, likh kar, ya image bhej kar sawaal poochein."
 )
 
 private fun saveChatHistory(context: Context, messages: List<ChatMessage>) {
@@ -204,6 +261,58 @@ private fun loadChatHistory(context: Context): List<ChatMessage> {
     }
 }
 
+private fun saveSettings(
+    context: Context,
+    autoScroll: Boolean,
+    compactCards: Boolean,
+    lightTheme: Boolean
+) {
+    context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean("auto_scroll", autoScroll)
+        .putBoolean("compact_cards", compactCards)
+        .putBoolean("light_theme", lightTheme)
+        .apply()
+}
+
+private fun loadAutoScroll(context: Context): Boolean =
+    context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
+        .getBoolean("auto_scroll", true)
+
+private fun loadCompactCards(context: Context): Boolean =
+    context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
+        .getBoolean("compact_cards", false)
+
+private fun loadLightTheme(context: Context): Boolean =
+    context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
+        .getBoolean("light_theme", false)
+
+@Composable
+private fun TwoLineMenuIcon(tint: Color) {
+    Canvas(modifier = Modifier.size(22.dp)) {
+        val strokeWidth = 2.4.dp.toPx()
+        val leftX = 3.dp.toPx()
+        val rightX = size.width - 3.dp.toPx()
+        val y1 = size.height * 0.36f
+        val y2 = size.height * 0.64f
+
+        drawLine(
+            color = tint,
+            start = Offset(leftX, y1),
+            end = Offset(rightX, y1),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = tint,
+            start = Offset(leftX, y2),
+            end = Offset(rightX, y2),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round
+        )
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -212,26 +321,8 @@ class MainActivity : ComponentActivity() {
             clientToken = BuildConfig.APP_CLIENT_TOKEN
         )
 
-        val darkScheme = darkColorScheme(
-            primary = StudioAccent,
-            onPrimary = Color(0xFF04131D),
-            primaryContainer = StudioUserBubble,
-            onPrimaryContainer = StudioText,
-            background = StudioBg,
-            onBackground = StudioText,
-            surface = StudioSurface,
-            onSurface = StudioText,
-            surfaceVariant = StudioElevated,
-            onSurfaceVariant = StudioMuted,
-            errorContainer = StudioErrorBg,
-            onErrorContainer = Color(0xFFFECACA),
-            error = StudioErrorBorder
-        )
-
         setContent {
-            MaterialTheme(colorScheme = darkScheme) {
-                CoAIdeScreen(repo = repo)
-            }
+            CoAIdeScreen(repo = repo)
         }
     }
 }
@@ -242,6 +333,7 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val clipboardManager = LocalClipboardManager.current
 
     var inputText by remember { mutableStateOf("") }
@@ -249,10 +341,57 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var encodedImage by remember { mutableStateOf<EncodedImage?>(null) }
 
+    var autoScrollEnabled by remember { mutableStateOf(loadAutoScroll(context)) }
+    var compactCardsEnabled by remember { mutableStateOf(loadCompactCards(context)) }
+    var isLightTheme by remember { mutableStateOf(loadLightTheme(context)) }
+
+    val palette = if (isLightTheme) LightPalette else DarkPalette
+
+    val colorScheme = if (palette.isDark) {
+        darkColorScheme(
+            primary = palette.accent,
+            onPrimary = palette.onAccent,
+            primaryContainer = palette.userBubble,
+            onPrimaryContainer = palette.text,
+            background = palette.bg,
+            onBackground = palette.text,
+            surface = palette.surface,
+            onSurface = palette.text,
+            surfaceVariant = palette.elevated,
+            onSurfaceVariant = palette.muted,
+            errorContainer = palette.errorBg,
+            onErrorContainer = palette.errorText,
+            error = palette.errorBorder
+        )
+    } else {
+        lightColorScheme(
+            primary = palette.accent,
+            onPrimary = palette.onAccent,
+            primaryContainer = palette.userBubble,
+            onPrimaryContainer = palette.text,
+            background = palette.bg,
+            onBackground = palette.text,
+            surface = palette.surface,
+            onSurface = palette.text,
+            surfaceVariant = palette.elevated,
+            onSurfaceVariant = palette.muted,
+            errorContainer = palette.errorBg,
+            onErrorContainer = palette.errorText,
+            error = palette.errorBorder
+        )
+    }
+
     val messages = remember {
         mutableStateListOf<ChatMessage>().apply {
             addAll(loadChatHistory(context))
         }
+    }
+
+    val userHistoryPrompts = remember(messages.size) {
+        messages
+            .filter { it.role == "user" && it.text.isNotBlank() }
+            .map { it.text }
+            .reversed()
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(
@@ -266,270 +405,626 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
         }
     }
 
-    LaunchedEffect(messages.size, isLoading) {
+    val voiceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val spoken = matches?.firstOrNull()?.trim().orEmpty()
+            if (spoken.isNotBlank()) {
+                inputText = if (inputText.isBlank()) spoken else "$inputText $spoken"
+            }
+        }
+    }
+
+    fun launchVoiceInput() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "CoAIde se coding sawaal bolein...")
+        }
+        try {
+            voiceLauncher.launch(intent)
+        } catch (_: Exception) {
+            Toast.makeText(
+                context,
+                "Is device par voice recognition available nahi hai.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    LaunchedEffect(messages.size, isLoading, autoScrollEnabled) {
         saveChatHistory(context, messages)
-        if (messages.isNotEmpty()) {
+        if (autoScrollEnabled && messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
         }
     }
 
-    Scaffold(
-        containerColor = StudioBg,
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = StudioSurface,
-                    titleContentColor = StudioText
-                ),
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = "CoAIde",
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 19.sp,
-                                    color = StudioText
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            color = StudioAccent.copy(alpha = 0.15f),
-                                            shape = RoundedCornerShape(6.dp)
-                                        )
-                                        .border(
-                                            width = 1.dp,
-                                            color = StudioAccent.copy(alpha = 0.5f),
-                                            shape = RoundedCornerShape(6.dp)
-                                        )
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = "v${BuildConfig.VERSION_NAME}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = StudioAccent
-                                    )
-                                }
-                            }
-                            Text(
-                                text = "Built by Aamir Alam • History Saved",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = StudioMuted
-                            )
-                        }
-                    }
-                },
-                actions = {
-                    TextButton(
-                        enabled = !isLoading && messages.size > 1,
-                        onClick = {
-                            messages.clear()
-                            messages.add(welcomeMessage())
-                            saveChatHistory(context, messages)
-                        }
-                    ) {
-                        Text("Reset", color = StudioAccent)
-                    }
-                }
-            )
-        },
-        bottomBar = {
-            Surface(
-                color = StudioSurface,
-                tonalElevation = 4.dp
-            ) {
-                Column(
+    MaterialTheme(colorScheme = colorScheme) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            scrimColor = Color.Black.copy(alpha = 0.60f),
+            drawerContent = {
+                ModalDrawerSheet(
+                    drawerContainerColor = palette.surface,
+                    drawerContentColor = palette.text,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .navigationBarsPadding()
-                        .imePadding()
-                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .widthIn(max = 310.dp)
+                        .fillMaxHeight()
                 ) {
-                    if (isLoading) {
-                        LinearProgressIndicator(
-                            color = StudioAccent,
-                            trackColor = StudioElevated,
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Drawer Header & App Info
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(bottom = 8.dp)
-                        )
-                    }
+                                .background(palette.elevated, RoundedCornerShape(14.dp))
+                                .border(1.dp, palette.accent.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                                .padding(12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "CoAIde Menu",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 18.sp,
+                                    color = palette.text
+                                )
+                                Text(
+                                    text = "v${BuildConfig.VERSION_NAME}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = palette.accent
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Creator: Aamir Alam",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = palette.accent
+                            )
+                            Text(
+                                text = "Package: ${BuildConfig.APPLICATION_ID}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = palette.muted
+                            )
+                        }
 
-                    val currentPreview = encodedImage?.previewBitmap
-                    if (currentPreview != null || selectedUri != null) {
+                        // Quick Developer Shortcuts
+                        Text(
+                            text = "QUICK PROMPTS",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.muted
+                        )
+
+                        val quickPrompts = listOf(
+                            "Jetpack Compose mein clean card component ka code likho",
+                            "Is code/bug ko step-by-step explain aur fix karo: ",
+                            "Android app architecture aur folder structure suggest karo"
+                        )
+                        quickPrompts.forEach { sample ->
+                            Surface(
+                                color = palette.bg,
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, palette.border),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        inputText = sample
+                                        scope.launch { drawerState.close() }
+                                    }
+                            ) {
+                                Text(
+                                    text = sample,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = palette.text,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(color = palette.border)
+
+                        // Settings Section
+                        Text(
+                            text = "SETTINGS",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = palette.muted
+                        )
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(bottom = 8.dp)
-                                .background(StudioElevated, RoundedCornerShape(12.dp))
-                                .border(1.dp, StudioAccent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                                .padding(8.dp),
+                                .background(palette.bg, RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (currentPreview != null) {
-                                    Image(
-                                        bitmap = currentPreview.asImageBitmap(),
-                                        contentDescription = "Selected Image",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier
-                                            .size(54.dp)
-                                            .clip(RoundedCornerShape(8.dp))
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Image attached",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = StudioText
+                                    text = "Light Screen Mode",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = palette.text
+                                )
+                                Text(
+                                    text = if (isLightTheme) "Abhi Light mode on hai" else "Abhi Dark mode on hai",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = palette.muted
                                 )
                             }
-                            TextButton(
-                                onClick = {
-                                    selectedUri = null
-                                    encodedImage = null
-                                }
-                            ) {
-                                Text("Remove", color = StudioErrorBorder)
-                            }
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        OutlinedButton(
-                            enabled = !isLoading,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.height(52.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp),
-                            border = BorderStroke(1.dp, Color(0xFF283548)),
-                            onClick = { galleryLauncher.launch("image/*") }
-                        ) {
-                            Text(
-                                text = "Img",
-                                color = StudioAccent,
-                                fontWeight = FontWeight.SemiBold
+                            Switch(
+                                checked = isLightTheme,
+                                onCheckedChange = { checked ->
+                                    isLightTheme = checked
+                                    saveSettings(context, autoScrollEnabled, compactCardsEnabled, isLightTheme)
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = palette.onAccent,
+                                    checkedTrackColor = palette.accent
+                                )
                             )
                         }
 
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        OutlinedTextField(
-                            value = inputText,
-                            onValueChange = { inputText = it },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(14.dp),
-                            placeholder = {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(palette.bg, RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    "Code ya bug poochein...",
-                                    color = StudioMuted
+                                    text = "Auto-Scroll",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = palette.text
                                 )
-                            },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = StudioText,
-                                unfocusedTextColor = StudioText,
-                                focusedContainerColor = StudioElevated,
-                                unfocusedContainerColor = StudioElevated,
-                                focusedBorderColor = StudioAccent,
-                                unfocusedBorderColor = Color(0xFF283548),
-                                cursorColor = StudioAccent
-                            ),
-                            maxLines = 5
-                        )
-
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        Button(
-                            enabled = !isLoading && (inputText.isNotBlank() || encodedImage != null),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.height(52.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = StudioAccent,
-                                contentColor = Color(0xFF04131D),
-                                disabledContainerColor = StudioElevated,
-                                disabledContentColor = StudioMuted
-                            ),
-                            onClick = {
-                                val prompt = inputText.trim()
-                                val imgToSend = encodedImage
-                                val uriStr = selectedUri?.toString()
-
-                                inputText = ""
-                                selectedUri = null
-                                encodedImage = null
-
-                                val displayText = if (prompt.isNotBlank()) {
-                                    prompt
-                                } else {
-                                    "Is image ko dekhein aur coding/error help dein."
-                                }
-
-                                messages.add(
-                                    ChatMessage(
-                                        sender = "Aamir",
-                                        role = "user",
-                                        text = displayText,
-                                        imageUriString = uriStr
-                                    )
+                                Text(
+                                    text = "Naye message par apne aap neeche jaye",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = palette.muted
                                 )
-                                isLoading = true
+                            }
+                            Switch(
+                                checked = autoScrollEnabled,
+                                onCheckedChange = { checked ->
+                                    autoScrollEnabled = checked
+                                    saveSettings(context, autoScrollEnabled, compactCardsEnabled, isLightTheme)
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = palette.onAccent,
+                                    checkedTrackColor = palette.accent
+                                )
+                            )
+                        }
 
-                                val historyPairs = messages
-                                    .filter { !it.isError }
-                                    .dropLast(1)
-                                    .map { it.role to it.text }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(palette.bg, RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Compact View",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = palette.text
+                                )
+                                Text(
+                                    text = "Kam padding ke saath zyada chat dikhaye",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = palette.muted
+                                )
+                            }
+                            Switch(
+                                checked = compactCardsEnabled,
+                                onCheckedChange = { checked ->
+                                    compactCardsEnabled = checked
+                                    saveSettings(context, autoScrollEnabled, compactCardsEnabled, isLightTheme)
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = palette.onAccent,
+                                    checkedTrackColor = palette.accent
+                                )
+                            )
+                        }
 
-                                scope.launch {
-                                    val result = repo.askCoAIde(
-                                        history = historyPairs,
-                                        userPrompt = displayText,
-                                        imageBase64 = imgToSend?.base64,
-                                        imageMime = imgToSend?.mimeType ?: "image/jpeg"
-                                    )
-                                    isLoading = false
-                                    result.onSuccess { reply ->
-                                        messages.add(ChatMessage("CoAIde", "model", reply))
-                                    }.onFailure { err ->
-                                        messages.add(
-                                            ChatMessage(
-                                                sender = "Error",
-                                                role = "model",
-                                                text = err.message ?: "Kuch galat hua",
-                                                isError = true
-                                            )
-                                        )
+                        HorizontalDivider(color = palette.border)
+
+                        // History Section
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "HISTORY (${userHistoryPrompts.size})",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.muted
+                            )
+                            if (messages.size > 1) {
+                                TextButton(
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    onClick = {
+                                        messages.clear()
+                                        messages.add(welcomeMessage())
+                                        saveChatHistory(context, messages)
+                                        scope.launch { drawerState.close() }
                                     }
+                                ) {
+                                    Text(
+                                        text = "Clear All",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = palette.errorBorder
+                                    )
                                 }
                             }
-                        ) {
-                            Text("Run", fontWeight = FontWeight.Bold)
+                        }
+
+                        if (userHistoryPrompts.isEmpty()) {
+                            Text(
+                                text = "Abhi tak koi saved prompt history nahi hai.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = palette.muted,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        } else {
+                            userHistoryPrompts.forEach { pastPrompt ->
+                                Surface(
+                                    color = palette.bg,
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, palette.border),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            inputText = pastPrompt
+                                            scope.launch { drawerState.close() }
+                                        }
+                                ) {
+                                    Text(
+                                        text = pastPrompt,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = palette.text,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(10.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
-    ) { innerPadding ->
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 12.dp),
-            contentPadding = PaddingValues(vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            items(messages) { msg ->
-                ChatBubbleCard(
-                    message = msg,
-                    onCopy = { textToCopy ->
-                        clipboardManager.setText(AnnotatedString(textToCopy))
+            Scaffold(
+                containerColor = palette.bg,
+                topBar = {
+                    TopAppBar(
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = palette.surface,
+                            titleContentColor = palette.text
+                        ),
+                        navigationIcon = {
+                            IconButton(
+                                onClick = {
+                                    scope.launch {
+                                        if (drawerState.isClosed) drawerState.open() else drawerState.close()
+                                    }
+                                }
+                            ) {
+                                TwoLineMenuIcon(tint = palette.text)
+                            }
+                        },
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = "CoAIde",
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 19.sp,
+                                            color = palette.text
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .background(
+                                                    color = palette.accent.copy(alpha = 0.15f),
+                                                    shape = RoundedCornerShape(6.dp)
+                                                )
+                                                .border(
+                                                    width = 1.dp,
+                                                    color = palette.accent.copy(alpha = 0.5f),
+                                                    shape = RoundedCornerShape(6.dp)
+                                                )
+                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "v${BuildConfig.VERSION_NAME}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = palette.accent
+                                            )
+                                        }
+                                    }
+                                    Text(
+                                        text = "Built by Aamir Alam • ${if (isLightTheme) "Light" else "Dark"} Mode",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = palette.muted
+                                    )
+                                }
+                            }
+                        },
+                        actions = {
+                            TextButton(
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                onClick = {
+                                    isLightTheme = !isLightTheme
+                                    saveSettings(context, autoScrollEnabled, compactCardsEnabled, isLightTheme)
+                                }
+                            ) {
+                                Text(
+                                    text = if (isLightTheme) "Dark" else "Light",
+                                    color = palette.accent,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            TextButton(
+                                enabled = !isLoading && messages.size > 1,
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                onClick = {
+                                    messages.clear()
+                                    messages.add(welcomeMessage())
+                                    saveChatHistory(context, messages)
+                                }
+                            ) {
+                                Text("Reset", color = palette.accent)
+                            }
+                        }
+                    )
+                },
+                bottomBar = {
+                    Surface(
+                        color = palette.surface,
+                        tonalElevation = 4.dp
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .navigationBarsPadding()
+                                .imePadding()
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            if (isLoading) {
+                                LinearProgressIndicator(
+                                    color = palette.accent,
+                                    trackColor = palette.elevated,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 8.dp)
+                                )
+                            }
+
+                            val currentPreview = encodedImage?.previewBitmap
+                            if (currentPreview != null || selectedUri != null) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 8.dp)
+                                        .background(palette.elevated, RoundedCornerShape(12.dp))
+                                        .border(1.dp, palette.accent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (currentPreview != null) {
+                                            Image(
+                                                bitmap = currentPreview.asImageBitmap(),
+                                                contentDescription = "Selected Image",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(54.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(
+                                            text = "Image attached",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = palette.text
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            selectedUri = null
+                                            encodedImage = null
+                                        }
+                                    ) {
+                                        Text("Remove", color = palette.errorBorder)
+                                    }
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Bottom
+                            ) {
+                                OutlinedButton(
+                                    enabled = !isLoading,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.height(52.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp),
+                                    border = BorderStroke(1.dp, palette.border),
+                                    onClick = { galleryLauncher.launch("image/*") }
+                                ) {
+                                    Text(
+                                        text = "Img",
+                                        color = palette.accent,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(4.dp))
+
+                                OutlinedButton(
+                                    enabled = !isLoading,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.height(52.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp),
+                                    border = BorderStroke(1.dp, palette.border),
+                                    onClick = { launchVoiceInput() }
+                                ) {
+                                    Text(
+                                        text = "Mic",
+                                        color = palette.accent,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.width(6.dp))
+
+                                OutlinedTextField(
+                                    value = inputText,
+                                    onValueChange = { inputText = it },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp),
+                                    placeholder = {
+                                        Text(
+                                            "Likhein ya Mic dabayein...",
+                                            color = palette.muted,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    },
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = palette.text,
+                                        unfocusedTextColor = palette.text,
+                                        focusedContainerColor = palette.elevated,
+                                        unfocusedContainerColor = palette.elevated,
+                                        focusedBorderColor = palette.accent,
+                                        unfocusedBorderColor = palette.border,
+                                        cursorColor = palette.accent
+                                    ),
+                                    maxLines = 5
+                                )
+
+                                Spacer(modifier = Modifier.width(6.dp))
+
+                                Button(
+                                    enabled = !isLoading && (inputText.isNotBlank() || encodedImage != null),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.height(52.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = palette.accent,
+                                        contentColor = palette.onAccent,
+                                        disabledContainerColor = palette.elevated,
+                                        disabledContentColor = palette.muted
+                                    ),
+                                    onClick = {
+                                        val prompt = inputText.trim()
+                                        val imgToSend = encodedImage
+                                        val uriStr = selectedUri?.toString()
+
+                                        inputText = ""
+                                        selectedUri = null
+                                        encodedImage = null
+
+                                        val displayText = if (prompt.isNotBlank()) {
+                                            prompt
+                                        } else {
+                                            "Is image ko dekhein aur coding/error help dein."
+                                        }
+
+                                        messages.add(
+                                            ChatMessage(
+                                                sender = "Aamir",
+                                                role = "user",
+                                                text = displayText,
+                                                imageUriString = uriStr
+                                            )
+                                        )
+                                        isLoading = true
+
+                                        val historyPairs = messages
+                                            .filter { !it.isError }
+                                            .dropLast(1)
+                                            .map { it.role to it.text }
+
+                                        scope.launch {
+                                            val result = repo.askCoAIde(
+                                                history = historyPairs,
+                                                userPrompt = displayText,
+                                                imageBase64 = imgToSend?.base64,
+                                                imageMime = imgToSend?.mimeType ?: "image/jpeg"
+                                            )
+                                            isLoading = false
+                                            result.onSuccess { reply ->
+                                                messages.add(ChatMessage("CoAIde", "model", reply))
+                                            }.onFailure { err ->
+                                                messages.add(
+                                                    ChatMessage(
+                                                        sender = "Error",
+                                                        role = "model",
+                                                        text = err.message ?: "Kuch galat hua",
+                                                        isError = true
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Text("Run", fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
                     }
-                )
+                }
+            ) { innerPadding ->
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(horizontal = if (compactCardsEnabled) 8.dp else 12.dp),
+                    contentPadding = PaddingValues(vertical = if (compactCardsEnabled) 6.dp else 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (compactCardsEnabled) 6.dp else 10.dp)
+                ) {
+                    items(messages) { msg ->
+                        ChatBubbleCard(
+                            message = msg,
+                            compact = compactCardsEnabled,
+                            palette = palette,
+                            onCopy = { textToCopy ->
+                                clipboardManager.setText(AnnotatedString(textToCopy))
+                            }
+                        )
+                    }
+                }
             }
         }
     }
@@ -538,6 +1033,8 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
 @Composable
 private fun ChatBubbleCard(
     message: ChatMessage,
+    compact: Boolean,
+    palette: CoAIdePalette,
     onCopy: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -552,15 +1049,15 @@ private fun ChatBubbleCard(
     }
 
     val containerColor = when {
-        message.isError -> StudioErrorBg
-        isUser -> StudioUserBubble
-        else -> StudioSurface
+        message.isError -> palette.errorBg
+        isUser -> palette.userBubble
+        else -> palette.surface
     }
 
     val borderStroke = when {
-        message.isError -> BorderStroke(1.dp, StudioErrorBorder)
-        isUser -> BorderStroke(1.dp, StudioAccent.copy(alpha = 0.35f))
-        else -> BorderStroke(1.dp, Color(0xFF233044))
+        message.isError -> BorderStroke(1.dp, palette.errorBorder)
+        isUser -> BorderStroke(1.dp, palette.accent.copy(alpha = 0.35f))
+        else -> BorderStroke(1.dp, palette.border)
     }
 
     Row(
@@ -578,7 +1075,7 @@ private fun ChatBubbleCard(
             color = containerColor,
             border = borderStroke
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
+            Column(modifier = Modifier.padding(if (compact) 9.dp else 12.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -589,9 +1086,9 @@ private fun ChatBubbleCard(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold,
                         color = when {
-                            message.isError -> StudioErrorBorder
-                            isUser -> StudioAccent
-                            else -> StudioMuted
+                            message.isError -> palette.errorBorder
+                            isUser -> palette.accent
+                            else -> palette.muted
                         }
                     )
 
@@ -608,7 +1105,7 @@ private fun ChatBubbleCard(
                         Text(
                             text = if (copied) "Copied" else "Copy",
                             style = MaterialTheme.typography.labelSmall,
-                            color = StudioAccent
+                            color = palette.accent
                         )
                     }
                 }
@@ -637,7 +1134,7 @@ private fun ChatBubbleCard(
                                     Text(
                                         text = part.content,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        color = if (message.isError) Color(0xFFFECACA) else StudioText
+                                        color = if (message.isError) palette.errorText else palette.text
                                     )
                                 }
 
@@ -646,12 +1143,12 @@ private fun ChatBubbleCard(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .background(
-                                                color = StudioCodeBg,
+                                                color = palette.codeBg,
                                                 shape = RoundedCornerShape(10.dp)
                                             )
                                             .border(
                                                 width = 1.dp,
-                                                color = Color(0xFF1F2A3C),
+                                                color = palette.codeBorder,
                                                 shape = RoundedCornerShape(10.dp)
                                             )
                                             .padding(10.dp)
@@ -665,7 +1162,7 @@ private fun ChatBubbleCard(
                                                 text = part.language,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 fontFamily = FontFamily.Monospace,
-                                                color = StudioMuted
+                                                color = Color(0xFF94A3B8)
                                             )
                                             TextButton(
                                                 contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
@@ -675,7 +1172,7 @@ private fun ChatBubbleCard(
                                                 Text(
                                                     text = "Copy Code",
                                                     style = MaterialTheme.typography.labelSmall,
-                                                    color = StudioAccent
+                                                    color = Color(0xFF38BDF8)
                                                 )
                                             }
                                         }
@@ -684,7 +1181,7 @@ private fun ChatBubbleCard(
                                             text = part.code,
                                             style = MaterialTheme.typography.bodySmall,
                                             fontFamily = FontFamily.Monospace,
-                                            color = StudioText,
+                                            color = palette.codeText,
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .horizontalScroll(rememberScrollState())
