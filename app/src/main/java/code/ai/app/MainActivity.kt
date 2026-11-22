@@ -59,6 +59,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.Locale
+import java.util.UUID
 
 private data class CoAIdePalette(
     val isDark: Boolean,
@@ -126,6 +127,12 @@ data class ChatMessage(
     val isError: Boolean = false
 )
 
+data class ChatTopicSession(
+    val id: String,
+    val title: String,
+    val messages: List<ChatMessage>
+)
+
 private data class EncodedImage(
     val base64: String,
     val mimeType: String,
@@ -172,6 +179,26 @@ private fun parseMessageParts(rawText: String): List<MessagePart> {
     }
 
     return parts
+}
+
+private fun buildTopicTitle(rawPrompt: String, fileName: String?, hasImage: Boolean): String {
+    val cleaned = rawPrompt
+        .replace(Regex("```[\\s\\S]*?```"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    if (cleaned.isNotBlank()) {
+        val words = cleaned.split(" ").filter { it.isNotBlank() }
+        val shortTitle = words.take(5).joinToString(" ")
+        return if (shortTitle.length > 34) shortTitle.take(34).trimEnd() + "..." else shortTitle
+    }
+    if (!fileName.isNullOrBlank()) {
+        return "File: $fileName".take(34)
+    }
+    if (hasImage) {
+        return "Image Analysis"
+    }
+    return "Naya Topic"
 }
 
 private fun queryDisplayName(context: Context, uri: Uri): String {
@@ -250,58 +277,135 @@ private suspend fun loadBitmapFromUriString(context: Context, uriString: String)
 private fun welcomeMessage(): ChatMessage = ChatMessage(
     sender = "CoAIde",
     role = "model",
-    text = "Namaste! Main CoAIde hoon (v3.35.5) — Aamir Alam dwara banaya gaya coding assistant. Bolkar, likh kar, file attach karke, ya image bhej kar sawaal poochein."
+    text = "Namaste! Main CoAIde hoon (v3.35.5) — Aamir Alam dwara banaya gaya coding assistant. Naya topic shuru karein ya coding/bug poochein."
 )
 
-private fun saveChatHistory(context: Context, messages: List<ChatMessage>) {
-    val prefs = context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
-    val arr = JSONArray()
-    for (msg in messages) {
-        val obj = JSONObject()
-            .put("sender", msg.sender)
-            .put("role", msg.role)
-            .put("text", msg.text)
-            .put("isError", msg.isError)
+private fun createFreshSession(title: String = "Naya Topic"): ChatTopicSession = ChatTopicSession(
+    id = UUID.randomUUID().toString(),
+    title = title,
+    messages = listOf(welcomeMessage())
+)
+
+private fun messageToJson(msg: ChatMessage): JSONObject = JSONObject()
+    .put("sender", msg.sender)
+    .put("role", msg.role)
+    .put("text", msg.text)
+    .put("isError", msg.isError)
+    .apply {
         if (!msg.imageUriString.isNullOrBlank()) {
-            obj.put("imageUriString", msg.imageUriString)
+            put("imageUriString", msg.imageUriString)
         }
         if (!msg.fileName.isNullOrBlank()) {
-            obj.put("fileName", msg.fileName)
+            put("fileName", msg.fileName)
         }
-        arr.put(obj)
     }
-    prefs.edit().putString("saved_history_json", arr.toString()).apply()
+
+private fun jsonToMessage(obj: JSONObject): ChatMessage? {
+    val text = obj.optString("text", "")
+    val imgUri = obj.optString("imageUriString", "").ifBlank { null }
+    val fName = obj.optString("fileName", "").ifBlank { null }
+    if (text.isBlank() && imgUri == null && fName == null) return null
+    return ChatMessage(
+        sender = obj.optString("sender", "CoAIde"),
+        role = obj.optString("role", "model"),
+        text = text,
+        imageUriString = imgUri,
+        fileName = fName,
+        isError = obj.optBoolean("isError", false)
+    )
 }
 
-private fun loadChatHistory(context: Context): List<ChatMessage> {
+private fun saveTopicSessions(
+    context: Context,
+    sessions: List<ChatTopicSession>,
+    activeSessionId: String
+) {
     val prefs = context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
-    val raw = prefs.getString("saved_history_json", null) ?: return listOf(welcomeMessage())
-    return try {
-        val arr = JSONArray(raw)
-        if (arr.length() == 0) return listOf(welcomeMessage())
-        val list = mutableListOf<ChatMessage>()
-        for (i in 0 until arr.length()) {
-            val obj = arr.optJSONObject(i) ?: continue
-            val text = obj.optString("text", "")
-            val imgUri = obj.optString("imageUriString", "").ifBlank { null }
-            val fName = obj.optString("fileName", "").ifBlank { null }
-            if (text.isNotBlank() || imgUri != null || fName != null) {
-                list.add(
-                    ChatMessage(
-                        sender = obj.optString("sender", "CoAIde"),
-                        role = obj.optString("role", "model"),
-                        text = text,
-                        imageUriString = imgUri,
-                        fileName = fName,
-                        isError = obj.optBoolean("isError", false)
+    val sessionsArr = JSONArray()
+    for (s in sessions) {
+        val msgsArr = JSONArray()
+        for (m in s.messages) {
+            msgsArr.put(messageToJson(m))
+        }
+        sessionsArr.put(
+            JSONObject()
+                .put("id", s.id)
+                .put("title", s.title)
+                .put("messages", msgsArr)
+        )
+    }
+    prefs.edit()
+        .putString("saved_topics_json", sessionsArr.toString())
+        .putString("active_topic_id", activeSessionId)
+        .apply()
+}
+
+private fun loadTopicSessions(context: Context): Pair<List<ChatTopicSession>, String> {
+    val prefs = context.getSharedPreferences("coaide_prefs", Context.MODE_PRIVATE)
+    val rawTopics = prefs.getString("saved_topics_json", null)
+    val savedActiveId = prefs.getString("active_topic_id", null)
+
+    if (!rawTopics.isNullOrBlank()) {
+        try {
+            val arr = JSONArray(rawTopics)
+            val loaded = mutableListOf<ChatTopicSession>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id", "").ifBlank { UUID.randomUUID().toString() }
+                val title = obj.optString("title", "Naya Topic").ifBlank { "Naya Topic" }
+                val msgsArr = obj.optJSONArray("messages") ?: JSONArray()
+                val msgs = mutableListOf<ChatMessage>()
+                for (j in 0 until msgsArr.length()) {
+                    val mObj = msgsArr.optJSONObject(j) ?: continue
+                    jsonToMessage(mObj)?.let { msgs.add(it) }
+                }
+                loaded.add(
+                    ChatTopicSession(
+                        id = id,
+                        title = title,
+                        messages = if (msgs.isEmpty()) listOf(welcomeMessage()) else msgs
                     )
                 )
             }
+            if (loaded.isNotEmpty()) {
+                val validActive = if (loaded.any { it.id == savedActiveId }) {
+                    savedActiveId!!
+                } else {
+                    loaded.first().id
+                }
+                return loaded to validActive
+            }
+        } catch (_: Exception) {
+            // Fall through to legacy migration / fresh session
         }
-        if (list.isEmpty()) listOf(welcomeMessage()) else list
-    } catch (_: Exception) {
-        listOf(welcomeMessage())
     }
+
+    // Purane saved_history_json ko 1 topic session mein migrate karein
+    val legacyRaw = prefs.getString("saved_history_json", null)
+    if (!legacyRaw.isNullOrBlank()) {
+        try {
+            val arr = JSONArray(legacyRaw)
+            val msgs = mutableListOf<ChatMessage>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                jsonToMessage(obj)?.let { msgs.add(it) }
+            }
+            if (msgs.any { it.role == "user" }) {
+                val firstUser = msgs.firstOrNull { it.role == "user" }?.text.orEmpty()
+                val initial = ChatTopicSession(
+                    id = UUID.randomUUID().toString(),
+                    title = buildTopicTitle(firstUser, null, false),
+                    messages = msgs
+                )
+                return listOf(initial) to initial.id
+            }
+        } catch (_: Exception) {
+            // Ignore
+        }
+    }
+
+    val fresh = createFreshSession()
+    return listOf(fresh) to fresh.id
 }
 
 private fun saveSettings(
@@ -462,6 +566,20 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val clipboardManager = LocalClipboardManager.current
 
+    val initialPair = remember { loadTopicSessions(context) }
+    val sessions = remember {
+        mutableStateListOf<ChatTopicSession>().apply {
+            addAll(initialPair.first)
+        }
+    }
+    var activeSessionId by remember { mutableStateOf(initialPair.second) }
+
+    val activeSessionIndex = sessions.indexOfFirst { it.id == activeSessionId }.let {
+        if (it >= 0) it else 0
+    }
+    val currentSession = sessions[activeSessionIndex]
+    val messages = currentSession.messages
+
     var inputText by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var plusMenuExpanded by remember { mutableStateOf(false) }
@@ -508,19 +626,6 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
             onErrorContainer = palette.errorText,
             error = palette.errorBorder
         )
-    }
-
-    val messages = remember {
-        mutableStateListOf<ChatMessage>().apply {
-            addAll(loadChatHistory(context))
-        }
-    }
-
-    val userHistoryPrompts = remember(messages.size) {
-        messages
-            .filter { it.role == "user" && it.text.isNotBlank() }
-            .map { it.text }
-            .reversed()
     }
 
     val galleryLauncher = rememberLauncherForActivityResult(
@@ -588,8 +693,36 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
         }
     }
 
-    LaunchedEffect(messages.size, isLoading, autoScrollEnabled) {
-        saveChatHistory(context, messages)
+    fun startNewTopic() {
+        if (isLoading) return
+        val existingEmpty = sessions.firstOrNull { s ->
+            s.messages.none { it.role == "user" }
+        }
+        if (existingEmpty != null) {
+            activeSessionId = existingEmpty.id
+            saveTopicSessions(context, sessions, activeSessionId)
+            return
+        }
+        val newTopic = createFreshSession("Naya Topic")
+        sessions.add(0, newTopic)
+        activeSessionId = newTopic.id
+        saveTopicSessions(context, sessions, activeSessionId)
+    }
+
+    fun appendMessageToSession(sessionId: String, msg: ChatMessage, updatedTitle: String? = null) {
+        val idx = sessions.indexOfFirst { it.id == sessionId }
+        if (idx < 0) return
+        val old = sessions[idx]
+        val nextTitle = updatedTitle ?: old.title
+        sessions[idx] = old.copy(
+            title = nextTitle,
+            messages = old.messages + msg
+        )
+        saveTopicSessions(context, sessions, activeSessionId)
+    }
+
+    LaunchedEffect(messages.size, isLoading, autoScrollEnabled, activeSessionId) {
+        saveTopicSessions(context, sessions, activeSessionId)
         if (autoScrollEnabled && messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
         }
@@ -653,43 +786,127 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                             )
                         }
 
-                        Text(
-                            text = "QUICK PROMPTS",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.muted
-                        )
+                        Button(
+                            enabled = !isLoading,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = palette.accent,
+                                contentColor = palette.onAccent
+                            ),
+                            onClick = {
+                                startNewTopic()
+                                scope.launch { drawerState.close() }
+                            }
+                        ) {
+                            Text("+ New Topic Chat", fontWeight = FontWeight.Bold)
+                        }
 
-                        val quickPrompts = listOf(
-                            "Jetpack Compose mein clean card component ka code likho",
-                            "Is code/bug ko step-by-step explain aur fix karo: ",
-                            "Android app architecture aur folder structure suggest karo"
-                        )
-                        quickPrompts.forEach { sample ->
+                        HorizontalDivider(color = palette.border)
+
+                        // Topic History Section (Gemini style)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "TOPICS (${sessions.size})",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = palette.muted
+                            )
+                            if (sessions.size > 1 || messages.any { it.role == "user" }) {
+                                TextButton(
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    onClick = {
+                                        val fresh = createFreshSession("Naya Topic")
+                                        sessions.clear()
+                                        sessions.add(fresh)
+                                        activeSessionId = fresh.id
+                                        saveTopicSessions(context, sessions, activeSessionId)
+                                        scope.launch { drawerState.close() }
+                                    }
+                                ) {
+                                    Text(
+                                        text = "Clear All",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = palette.errorBorder
+                                    )
+                                }
+                            }
+                        }
+
+                        sessions.forEach { topic ->
+                            val isSelected = topic.id == activeSessionId
                             Surface(
-                                color = palette.bg,
+                                color = if (isSelected) palette.userBubble else palette.bg,
                                 shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, palette.border),
+                                border = BorderStroke(
+                                    width = 1.dp,
+                                    color = if (isSelected) palette.accent else palette.border
+                                ),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        inputText = sample
+                                        activeSessionId = topic.id
+                                        saveTopicSessions(context, sessions, activeSessionId)
                                         scope.launch { drawerState.close() }
                                     }
                             ) {
-                                Text(
-                                    text = sample,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = palette.text,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(10.dp)
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = topic.title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = if (isSelected) palette.accent else palette.text,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        val userCount = topic.messages.count { it.role == "user" }
+                                        Text(
+                                            text = if (userCount == 0) "Khali topic" else "$userCount sawaal",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = palette.muted
+                                        )
+                                    }
+
+                                    if (sessions.size > 1) {
+                                        TextButton(
+                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                                            modifier = Modifier.height(26.dp),
+                                            onClick = {
+                                                val remaining = sessions.filterNot { it.id == topic.id }
+                                                sessions.clear()
+                                                sessions.addAll(remaining)
+                                                if (activeSessionId == topic.id) {
+                                                    activeSessionId = sessions.first().id
+                                                }
+                                                saveTopicSessions(context, sessions, activeSessionId)
+                                            }
+                                        ) {
+                                            Text(
+                                                text = "Del",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = palette.errorBorder
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
 
                         HorizontalDivider(color = palette.border)
 
+                        // Settings Section
                         Text(
                             text = "SETTINGS",
                             style = MaterialTheme.typography.labelSmall,
@@ -795,71 +1012,6 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                 )
                             )
                         }
-
-                        HorizontalDivider(color = palette.border)
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "HISTORY (${userHistoryPrompts.size})",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = palette.muted
-                            )
-                            if (messages.size > 1) {
-                                TextButton(
-                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(26.dp),
-                                    onClick = {
-                                        messages.clear()
-                                        messages.add(welcomeMessage())
-                                        saveChatHistory(context, messages)
-                                        scope.launch { drawerState.close() }
-                                    }
-                                ) {
-                                    Text(
-                                        text = "Clear All",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = palette.errorBorder
-                                    )
-                                }
-                            }
-                        }
-
-                        if (userHistoryPrompts.isEmpty()) {
-                            Text(
-                                text = "Abhi tak koi saved prompt history nahi hai.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = palette.muted,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                        } else {
-                            userHistoryPrompts.forEach { pastPrompt ->
-                                Surface(
-                                    color = palette.bg,
-                                    shape = RoundedCornerShape(10.dp),
-                                    border = BorderStroke(1.dp, palette.border),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            inputText = pastPrompt
-                                            scope.launch { drawerState.close() }
-                                        }
-                                ) {
-                                    Text(
-                                        text = pastPrompt,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = palette.text,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(10.dp)
-                                    )
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -898,10 +1050,13 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                             Column {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        text = "CoAIde",
+                                        text = currentSession.title,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize = 18.sp,
-                                        color = palette.text
+                                        fontSize = 17.sp,
+                                        color = palette.text,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Box(
@@ -926,7 +1081,7 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                     }
                                 }
                                 Text(
-                                    text = "Built by Aamir Alam • ${if (isLightTheme) "Light" else "Dark"}",
+                                    text = "CoAIde • Aamir Alam • ${if (isLightTheme) "Light" else "Dark"}",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = palette.muted,
                                     maxLines = 1,
@@ -936,6 +1091,18 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                         }
 
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                enabled = !isLoading,
+                                contentPadding = PaddingValues(horizontal = 6.dp),
+                                onClick = { startNewTopic() }
+                            ) {
+                                Text(
+                                    text = "+ New",
+                                    color = palette.accent,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 13.sp
+                                )
+                            }
                             TextButton(
                                 contentPadding = PaddingValues(horizontal = 6.dp),
                                 onClick = {
@@ -949,17 +1116,6 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                     fontWeight = FontWeight.SemiBold,
                                     fontSize = 13.sp
                                 )
-                            }
-                            TextButton(
-                                enabled = !isLoading && messages.size > 1,
-                                contentPadding = PaddingValues(horizontal = 6.dp),
-                                onClick = {
-                                    messages.clear()
-                                    messages.add(welcomeMessage())
-                                    saveChatHistory(context, messages)
-                                }
-                            ) {
-                                Text("Reset", color = palette.accent, fontSize = 13.sp)
                             }
                         }
                     }
@@ -1188,6 +1344,7 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                     disabledContentColor = palette.muted
                                 ),
                                 onClick = {
+                                    val targetSessionId = currentSession.id
                                     val prompt = inputText.trim()
                                     val imgToSend = encodedImage
                                     val uriStr = selectedUri?.toString()
@@ -1204,21 +1361,33 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                         else -> "Is image ko dekhein aur coding/error help dein."
                                     }
 
-                                    messages.add(
-                                        ChatMessage(
+                                    val hasPriorUserMsg = currentSession.messages.any { it.role == "user" }
+                                    val nextTopicTitle = if (!hasPriorUserMsg) {
+                                        buildTopicTitle(
+                                            rawPrompt = prompt,
+                                            fileName = fileToSend?.fileName,
+                                            hasImage = imgToSend != null
+                                        )
+                                    } else {
+                                        null
+                                    }
+
+                                    val historyPairs = currentSession.messages
+                                        .filter { !it.isError }
+                                        .map { it.role to it.text }
+
+                                    appendMessageToSession(
+                                        sessionId = targetSessionId,
+                                        msg = ChatMessage(
                                             sender = "Aamir",
                                             role = "user",
                                             text = displayText,
                                             imageUriString = uriStr,
                                             fileName = fileToSend?.fileName
-                                        )
+                                        ),
+                                        updatedTitle = nextTopicTitle
                                     )
                                     isLoading = true
-
-                                    val historyPairs = messages
-                                        .filter { !it.isError }
-                                        .dropLast(1)
-                                        .map { it.role to it.text }
 
                                     scope.launch {
                                         val result = repo.askCoAIde(
@@ -1231,10 +1400,14 @@ fun CoAIdeScreen(repo: CoAIdeRepository) {
                                         )
                                         isLoading = false
                                         result.onSuccess { reply ->
-                                            messages.add(ChatMessage("CoAIde", "model", reply))
+                                            appendMessageToSession(
+                                                sessionId = targetSessionId,
+                                                msg = ChatMessage("CoAIde", "model", reply)
+                                            )
                                         }.onFailure { err ->
-                                            messages.add(
-                                                ChatMessage(
+                                            appendMessageToSession(
+                                                sessionId = targetSessionId,
+                                                msg = ChatMessage(
                                                     sender = "Error",
                                                     role = "model",
                                                     text = err.message ?: "Kuch galat hua",
