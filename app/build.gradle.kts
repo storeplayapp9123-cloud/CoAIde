@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -24,6 +26,24 @@ android {
         buildConfigField("String", "APP_CLIENT_TOKEN", "\"$clientToken\"")
     }
 
+    val releaseStorePath = (project.findProperty("RELEASE_STORE_FILE") as? String)
+        ?.takeIf { it.isNotBlank() }
+    val releaseStorePassword = (project.findProperty("RELEASE_STORE_PASSWORD") as? String).orEmpty()
+    val releaseKeyAlias = (project.findProperty("RELEASE_KEY_ALIAS") as? String).orEmpty()
+    val releaseKeyPassword = (project.findProperty("RELEASE_KEY_PASSWORD") as? String).orEmpty()
+
+    signingConfigs {
+        create("release") {
+            if (releaseStorePath != null && releaseStorePassword.isNotBlank() && releaseKeyAlias.isNotBlank()) {
+                val candidateFile = File(releaseStorePath)
+                storeFile = if (candidateFile.isAbsolute) candidateFile else rootProject.file(releaseStorePath)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = if (releaseKeyPassword.isNotBlank()) releaseKeyPassword else releaseStorePassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -31,6 +51,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseConfig = signingConfigs.getByName("release")
+            if (releaseConfig.storeFile != null) {
+                signingConfig = releaseConfig
+            }
         }
     }
 
